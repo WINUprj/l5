@@ -1,7 +1,7 @@
 # parameters
-ARG REPO_NAME="LAB_4"
-ARG DESCRIPTION="StartCode"
-ARG MAINTAINER="Zepeng Xiao"
+ARG REPO_NAME="LAB_5_ON_BOT"
+ARG DESCRIPTION="Lab 5 code which runs on bot"
+ARG MAINTAINER="Haruto Tanaka"
 # pick an icon from: https://fontawesome.com/v4.7.0/icons/
 ARG ICON="cube"
 

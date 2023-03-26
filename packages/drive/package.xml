@@ -1,14 +1,13 @@
 <?xml version="1.0"?>
 <package>
-  <name>duckiebot_detection</name>
+  <name>drive</name>
   <version>1.0.0</version>
-  <description>Start Code for Exercise-4</description>
+  <description>Driving node</description>
 
-  <maintainer email="zepeng@ualberta.ca"> Xiao </maintainer>
-  <author email="zepeng@ualberta.ca"> Xiao </author>
+  <maintainer email="haruto@ualberta.ca"> Haruto </maintainer>
+  <author email="haruto@ualberta.ca"> Haruto </author>
 
   <license>GPLv3</license>
-
 
   <buildtool_depend>catkin</buildtool_depend>
   <build_depend>cv_bridge</build_depend>
@@ -19,7 +18,5 @@
   <run_depend>duckietown_msgs</run_depend>
   <run_depend>roscpp</run_depend>
   <run_depend>rospy</run_depend>
-
-
 
 </package>

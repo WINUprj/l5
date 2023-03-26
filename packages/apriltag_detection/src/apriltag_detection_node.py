@@ -9,6 +9,7 @@ import rospy
 
 from duckietown.dtros import DTROS, NodeType
 from img_msgs.srv import DigitImage
+from std_msgs.msg import Int32
 from sensor_msgs.msg import CompressedImage
 from dt_apriltags import Detector
 
@@ -81,23 +82,27 @@ class ApriltagDetectionNode(DTROS):
         ]
         self.h = -1
         self.w = -1
-        
-        # Service proxies
-        rospy.wait_for_service("digit_class")
-        self.send_digit = rospy.ServiceProxy("digit_class",
-                                            DigitImage)
+
+        self.prev_tag_id = -1
         
         if DEBUG:
             rospy.loginfo("Connected to a server.")
 
+        # Service proxies
+        rospy.wait_for_service(f"/{self.veh}/get_digit_img")
+        self.send_digit = rospy.ServiceProxy(f"/{self.veh}/get_digit_img", DigitImage)
+        if DEBUG:
+            rospy.loginfo("Connected to a server.")
+
         # Subscriber
-        self.cnt = 0
+        self.counts = 0
+        self.cur_value = None
         self.sub_cam = rospy.Subscriber(
             f"/{self.veh}/camera_node/image/compressed",
             CompressedImage,
             self.cb_cam
         )
-        
+
         # Publishers
         self.mx_area = 0
         self.mx_tag_id = 0
@@ -113,7 +118,6 @@ class ApriltagDetectionNode(DTROS):
             queue_size=1
         )
 
-
     def undistort(self, img):
         """Undistort the distorted image with precalculated parameters."""
         return cv2.undistort(img,
@@ -123,24 +127,26 @@ class ApriltagDetectionNode(DTROS):
                              self.camera_mat)
 
     def publish(self, marked_img=None, digit_img=None):
+        """Publish and send the service request."""
         if marked_img is not None:
             msg = self.bridge.cv2_to_compressed_imgmsg(marked_img)
             self.pub_view.publish(msg)
         
         if digit_img is not None:
             msg = self.bridge.cv2_to_compressed_imgmsg(digit_img)
-            self.pub_digit_img.publish(msg)
+            x = self.send_digit(msg, self.mx_tag_id)
+            rospy.loginfo(x.cls)
 
     def extract_tag_corners(self, tag):
         """Reformat the tag corners to usable format."""
-        ptA, ptB, ptC, ptD = tag.corners
+        (ptA, ptB, ptC, ptD) = tag.corners
 
         ptA = (int(ptA[0]), int(ptA[1]))
         ptB = (int(ptB[0]), int(ptB[1]))
         ptC = (int(ptC[0]), int(ptC[1]))
-        ptC = (int(ptD[0]), int(ptD[1]))
+        ptD = (int(ptD[0]), int(ptD[1]))
         
-        return ptA, ptB, ptC, ptD
+        return (ptA, ptB, ptC, ptD)
 
     def get_max_tag(self, tags):
         """Get maximum sized tag"""
@@ -154,24 +160,30 @@ class ApriltagDetectionNode(DTROS):
                 mx_area = area
                 mx_tag = tag
         
+        if mx_tag is not None:
+            self.mx_tag_id = mx_tag.tag_id
         return mx_area, mx_tag
 
-    def draw_apriltag_bbox(self, img, tag, col=(0, 0, 255)):
+    def draw_bbox(self, img, corners, col=(0, 0, 255)):
         """Draw apriltag bbox."""
-        ptA, ptB, ptC, ptD = self.extract_tag_corners(tag)
-
-        cv2.line(img, ptA, ptB, col, 2)
-        cv2.line(img, ptB, ptC, col, 2)
-        cv2.line(img, ptC, ptD, col, 2)
-        cv2.line(img, ptD, ptA, col, 2)
+        a, b, c, d = corners
         
-        # TODO: Add few decorations
+        cv2.line(img, a, b, col, 2)
+        cv2.line(img, b, c, col, 2)
+        cv2.line(img, c, d, col, 2)
+        cv2.line(img, d, a, col, 2)
+
+        if self.cur_value is not None:
+            cx, cy = (a[0] + c[0]) // 2, (a[1] + b[1]) // 2
+            cv2.putText(img, self.cur_value, (cx, cy + 15),
+                        cv2.FONT_HERSHEY_SIMPLEX, 0.5, 
+                        (255, 0, 0), 2)
         return img
         
     def get_digit_img(self, img, tag):
         """Get cropped image for digit"""
         # Enumerate through the detection results
-        ptA, ptB, ptC, ptD = self.extract_tag_corners(tag)
+        (ptA, ptB, ptC, ptD) = self.extract_tag_corners(tag)
         
         # Crop sufficiently large region of digit image
         x_lst = [ptA[0], ptB[0], ptC[0], ptD[0]]
@@ -180,39 +192,48 @@ class ApriltagDetectionNode(DTROS):
         mn_x, mx_x = min(x_lst), max(x_lst)
         mn_y, mx_y = min(y_lst), max(y_lst)
 
-        cropped = img[max(0, mn_y-(mx_y-mn_y)-20):mn_y, max(0, mn_x-20):min(mx_x+20, img.shape[1]), :]
+        corners = (
+            (max(0, mn_x-20), max(0, mn_y-(mx_y-mn_y)-20)),
+            (max(0, mn_x-20), mn_y),
+            (min(mx_x+20, img.shape[1]), mn_y),
+            (min(mx_x+20, img.shape[1]), max(0, mn_y-(mx_y-mn_y)-20)),
+        )
+
+        cropped = img[corners[0][1]:corners[1][1], corners[0][0]:corners[2][0], :]
         
         # Extract the contour with blue (background of digit)
-        cr_hsv = cv2.cvtColor(cropped, cv2.COLOR_BGR2HSV)
-        msk = cv2.inRange(cr_hsv, LOWER_BLUE, UPPER_BLUE)
-        contours, _ = cv2.findContours(msk,
-                            cv2.RETR_EXTERNAL,
-                            cv2.CHAIN_APPROX_NONE)
+        # cr_hsv = cv2.cvtColor(cropped, cv2.COLOR_BGR2HSV)
+        # msk = cv2.inRange(cr_hsv, LOWER_BLUE, UPPER_BLUE)
+        # contours, _ = cv2.findContours(msk,
+        #                     cv2.RETR_EXTERNAL,
+        #                     cv2.CHAIN_APPROX_NONE)
 
-        # Get a contour with maximum area
-        max_area = 20
-        max_idx = -1
-        for i in range(len(contours)):
-            area = cv2.contourArea(contours[i])
-            if area > max_area:
-                max_idx = i
-                max_area = area
+        # # Get a contour with maximum area
+        # max_area = 20
+        # max_idx = -1
+        # for i in range(len(contours)):
+        #     area = cv2.contourArea(contours[i])
+        #     if area > max_area:
+        #         max_idx = i
+        #         max_area = area
 
-        # Create mask to fill out the background
-        fwd_mask = np.zeros_like(msk)
-        cv2.fillPoly(fwd_mask, [contours[max_idx]], 255)
-        bck_mask = fwd_mask != 255
+        # # Create mask to fill out the background
+        # fwd_mask = np.zeros_like(msk)
+        # cv2.fillPoly(fwd_mask, [contours[max_idx]], 255)
+        # bck_mask = fwd_mask != 255
 
-        # Mask out the background
-        msk[bck_mask] = 255
+        # # Mask out the background
+        # msk[bck_mask] = 255
         
-        # Denoise and make character more visible
-        msk = cv2.dilate(msk, np.ones((3, 3), dtype=np.uint8))
-        digit_img = 255 - msk
+        # # Denoise and make character more visible
+        # msk = cv2.dilate(msk, np.ones((3, 3), dtype=np.uint8))
+        # digit_img = 255 - msk
+        digit_img = cropped
 
-        return digit_img
+        return digit_img, corners 
 
     def cb_cam(self, msg):
+        """Callback for camera image."""
         if self.counts % 7 == 0:
             img = np.frombuffer(msg.data, np.uint8) 
             img = cv2.imdecode(img, cv2.IMREAD_COLOR)
@@ -234,14 +255,16 @@ class ApriltagDetectionNode(DTROS):
             mx_area, mx_tag = self.get_max_tag(tags)
             
             digit_img, view_img = None, img
-            if mx_area > (self.h * self.w * 0.2):
+            if mx_area > (self.h * self.w * 0.4) and self.prev_tag_id != mx_tag.tag_id:
                 # Plot the bbox of apriltag and crop the digit image if apriltag
                 # bbox area is reasonably larage
-                view_img = self.draw_apriltag_bbox(img, mx_tag)
-                digit_img = self.get_digit_img(img, mx_tag)
+                digit_img, corners = self.get_digit_img(img, mx_tag)
+                view_img = self.draw_bbox(img, corners)
 
                 if digit_img.sum() == 0:
                     digit_img = None
+                
+                self.prev_tag_id = mx_tag.tag_id
             
             # Publish images
             self.publish(view_img, digit_img)
