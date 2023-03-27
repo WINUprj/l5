@@ -7,6 +7,7 @@ from sensor_msgs.msg import CompressedImage
 from img_msgs.srv import DigitImage, DigitImageResponse
 from turbojpeg import TurboJPEG
 import cv2
+from cv_bridge import CvBridge
 from duckietown_msgs.msg import Twist2DStamped
 import numpy as np
 
@@ -29,7 +30,10 @@ class DriveNode(DTROS):
         ### Service proxy
         rospy.wait_for_service("/local/digit_class")
         self.get_pred = rospy.ServiceProxy("/local/digit_class", DigitImage)
-        rospy.loginfo("Connected to a server (nince)!")
+        # rospy.loginfo(f"Service proxy to /local/digit_class is ready")
+
+        rospy.wait_for_service("/local/shut_down")
+        self.shutdown_local = rospy.ServiceProxy("/local/shut_down", DigitImage)
 
         ### Services
         self.srv_digit_img = rospy.Service(
@@ -80,11 +84,14 @@ class DriveNode(DTROS):
         else:
             self.offset = 220
 
+        self.dummy = CvBridge().cv2_to_compressed_imgmsg(np.zeros((2, 2), np.uint8))
 
-        self.velocity = 0.35
+        self.velocity = 0.34
         self.twist = Twist2DStamped(v=self.velocity, omega=0)
 
         self.intersection_turn = None
+
+        self.preds = np.zeros(10)
 
         # PID related terms
         self.P = 0.037
@@ -130,13 +137,23 @@ class DriveNode(DTROS):
         """Callback for digit image service."""
         # Get prediction for the given image
         pred = self.get_pred(req.data, 1)
-        self.intersection_turn = req.tag_id
 
-        self.seen[pred.cls] = 1
+        if req.tag_id != self.intersection_turn:
 
-        rospy.loginfo(f"Detected digit: {pred.cls}, location: {self.tag_locations[pred.cls]}")
-        
-        return DigitImageResponse(pred.cls)
+            if self.intersection_turn is not None:
+                cls = self.preds.argmax(axis=0)
+                self.seen[cls] = 1
+                # Print out the results
+                rospy.loginfo(f"Prediction for the tag id: {self.intersection_turn} = {cls}")
+                rospy.loginfo(f"Location: {self.tag_locations[self.intersection_turn]}")
+
+            self.intersection_turn = req.tag_id
+            self.preds = np.zeros(10)
+
+        self.preds[pred.cls] += 1
+
+        # return pred
+        return pred
         
     def get_max_contour(self, contours):
         """Returns the index of contour with maximum area."""
@@ -251,10 +268,10 @@ class DriveNode(DTROS):
         """Turn the car at the intersection according to the direction given."""
         if right:
             print("Turing right...")
-            return self.velocity, -3.3
+            return self.velocity, -4.0
         else:
             print("Turining left...")
-            return self.velocity, 3.5
+            return self.velocity, 3.0
     
     def drive(self):
         """Decide how to move based on the given information and flags."""
@@ -273,7 +290,7 @@ class DriveNode(DTROS):
             # Track the center of leader robot to decide the direction to turn
             v, omega = self.stop()
         elif self.turning and ((rospy.get_rostime().secs - self.t_turn_start) < self.t_turn_start):
-            if self.intersection_turn in [62, 133]:
+            if self.intersection_turn in [162, 153]:
                 v, omega = self.turn(False)
             elif self.intersection_turn in [58, 169]:
                 v, omega = self.turn(True)
@@ -293,8 +310,18 @@ class DriveNode(DTROS):
         self.twist.v = 0
         self.twist.omega = 0
         self.vel_pub.publish(self.twist)
+        
+        # Service call to shutdown
+        self.shutdown_local(self.dummy, 1)
         for i in range(8):
             self.vel_pub.publish(self.twist)
+
+        # Shutdown the proxy service
+
+        self.shutdown_local.shutdown()
+        self.get_pred.shutdown()
+
+        
 
 
 if __name__ == "__main__":
@@ -304,6 +331,6 @@ if __name__ == "__main__":
         # Periodically send the driving command
         node.drive()
 
-        # if sum(node.seen) == 10:
-        #     break
+        if sum(node.seen) == 10:
+            rospy.signal_shutdown("SHUTTING DOWN")
         rate.sleep()
